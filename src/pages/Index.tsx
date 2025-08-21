@@ -11,7 +11,29 @@ import LanguageSelector from '@/components/LanguageSelector';
 import TranslationProgress from '@/components/TranslationProgress';
 import JSZip from 'jszip';
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
-import translate from 'libretranslate';
+// Nueva función: Traducción con Google Translate API
+// Endpoint local para traducción (evita CORS)
+const googleTranslateText = async (text: string, sourceLang: string, targetLang: string): Promise<string> => {
+  try {
+    const res = await fetch('/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, from: sourceLang === 'auto' ? 'auto' : sourceLang, to: targetLang })
+    });
+    if (!res.ok) throw new Error('Bad response');
+    const data = await res.json();
+    return data.translatedText || text;
+  } catch (e) {
+    console.error('Error en Google Translate:', e);
+    return text;
+  }
+};
+
+// Determina si un archivo debe omitirse de traducción
+const shouldSkipTranslation = (name: string) => {
+  const lower = name.toLowerCase();
+  return lower.includes('toc') || lower.includes('nav') || lower.includes('cover') || lower.endsWith('.css');
+};
 
 interface Model {
   id: string;
@@ -21,6 +43,33 @@ interface Model {
   recommended?: boolean;
   fast?: boolean;
 }
+
+// Función para dividir texto en fragmentos más pequeños
+const splitTextIntoChunks = (text: string, maxChunkSize: number = 1000): string[] => {
+  const chunks: string[] = [];
+  let currentChunk = '';
+  
+  // Dividir por párrafos primero
+  const paragraphs = text.split(/(<\/p>|<\/div>|<\/h[1-6]>)/);
+  
+  for (const paragraph of paragraphs) {
+    if ((currentChunk + paragraph).length > maxChunkSize && currentChunk) {
+      chunks.push(currentChunk);
+      currentChunk = paragraph;
+    } else {
+      currentChunk += paragraph;
+    }
+  }
+  
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+  
+  return chunks.length > 0 ? chunks : [text];
+};
+
+// Función para esperar un tiempo específico
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 const Index = () => {
   const { toast } = useToast();
@@ -70,27 +119,6 @@ const Index = () => {
     setError(null);
   }, []);
 
-  // Nueva función: Traducción con LibreTranslate
-  const libreTranslateText = async (text: string, sourceLang: string, targetLang: string): Promise<string> => {
-    try {
-      const res = await fetch('https://libretranslate.com/translate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          q: text,
-          source: sourceLang === 'auto' ? 'auto' : sourceLang,
-          target: targetLang,
-          format: 'html'
-        })
-      });
-      const data = await res.json();
-      return data.translatedText || text;
-    } catch (e) {
-      console.error('Error en LibreTranslate:', e);
-      return text;
-    }
-  };
-
   const handleRealTranslation = useCallback(async () => {
     if (!selectedFile) return;
     setIsProcessing(true);
@@ -102,35 +130,141 @@ const Index = () => {
       const zip = (window as any)._epubZip as JSZip;
       const textFiles: string[] = (window as any)._epubTextFiles;
       if (!zip || !textFiles) throw new Error('No se pudo cargar el EPUB');
-      const parser = new XMLParser({ ignoreAttributes: false });
+      const parser = new XMLParser({ 
+        ignoreAttributes: false,
+        parseTagValue: false,
+        parseAttributeValue: false,
+        trimValues: false
+      });
       const builder = new XMLBuilder({ ignoreAttributes: false });
-      let currentProgress = 0;
-      const progressIncrement = 100 / textFiles.length;
+      
+      let totalChunks = 0;
+      let processedChunks = 0;
+      const translatedFiles = new Map<string, string>(); // Almacenar archivos traducidos
+      
+      // Contar total de chunks para el progreso
       for (const fileName of textFiles) {
-        setStatus(`Traduciendo: ${fileName}`);
-        const fileContent = await zip.file(fileName)?.async('string');
-        if (!fileContent) continue;
-        const xmlObj = parser.parse(fileContent);
-        let bodyText = '';
-        if (xmlObj.html && xmlObj.html.body) {
-          bodyText = builder.build(xmlObj.html.body);
-        } else {
-          bodyText = fileContent;
+        if (shouldSkipTranslation(fileName)) continue;
+        try {
+          const fileContent = await zip.file(fileName)?.async('string');
+          if (!fileContent) continue;
+          
+          // Extraer texto de forma más simple
+          let bodyText = '';
+          try {
+            const xmlObj = parser.parse(fileContent);
+            if (xmlObj.html && xmlObj.html.body) {
+              bodyText = builder.build(xmlObj.html.body);
+            } else {
+              bodyText = fileContent;
+            }
+          } catch (parseError) {
+            console.warn('Error parseando XML, usando contenido directo:', fileName);
+            bodyText = fileContent;
+          }
+          
+          const chunks = splitTextIntoChunks(bodyText);
+          totalChunks += chunks.length;
+        } catch (error) {
+          console.warn('Error procesando archivo:', fileName, error);
         }
-        // Traducción con LibreTranslate
-        const translated = await libreTranslateText(bodyText, sourceLanguage, targetLanguage);
-        if (xmlObj.html && xmlObj.html.body) {
-          xmlObj.html.body = parser.parse(`<body>${translated}</body>`).body;
-          const newXml = builder.build(xmlObj);
-          zip.file(fileName, newXml);
-        } else {
-          zip.file(fileName, translated);
-        }
-        currentProgress += progressIncrement;
-        setProgress(Math.min(currentProgress, 100));
       }
+      
+      for (const fileName of textFiles) {
+        if (shouldSkipTranslation(fileName)) continue;
+        setStatus(`Procesando: ${fileName}`);
+        try {
+          const fileContent = await zip.file(fileName)?.async('string');
+          if (!fileContent) continue;
+          
+          // Extraer texto de forma más simple y segura
+          let bodyText = '';
+          try {
+            const xmlObj = parser.parse(fileContent);
+            if (xmlObj.html && xmlObj.html.body) {
+              bodyText = builder.build(xmlObj.html.body);
+            } else {
+              bodyText = fileContent;
+            }
+          } catch (parseError) {
+            console.warn('Error parseando XML, usando contenido directo:', fileName);
+            bodyText = fileContent;
+          }
+          
+          // Dividir texto en chunks y traducir cada uno
+          const chunks = splitTextIntoChunks(bodyText);
+          let translatedChunks: string[] = [];
+          
+          for (const chunk of chunks) {
+            try {
+              const translated = await googleTranslateText(chunk, sourceLanguage, targetLanguage);
+              translatedChunks.push(translated);
+              processedChunks++;
+              setProgress((processedChunks / totalChunks) * 100);
+              
+              // Pausa de 1 segundo entre traducciones
+              await sleep(1000);
+            } catch (error) {
+              console.error('Error traduciendo chunk:', error);
+              translatedChunks.push(chunk); // Usar texto original si falla
+            }
+          }
+          
+          const translatedText = translatedChunks.join('');
+          console.log('Archivo:', fileName);
+          console.log('Texto original:', bodyText.slice(0, 500));
+          console.log('Texto traducido:', translatedText.slice(0, 500));
+          
+          // Reemplazar el contenido del archivo
+          try {
+            const xmlObj = parser.parse(fileContent);
+            if (xmlObj.html && xmlObj.html.body) {
+              xmlObj.html.body = parser.parse(`<body>${translatedText}</body>`).body;
+              const newXml = builder.build(xmlObj);
+              translatedFiles.set(fileName, newXml);
+            } else {
+              translatedFiles.set(fileName, translatedText);
+            }
+          } catch (parseError) {
+            // Si falla el parsing, reemplazar todo el contenido
+            translatedFiles.set(fileName, translatedText);
+          }
+        } catch (error) {
+          console.error('Error procesando archivo:', fileName, error);
+        }
+      }
+      
       setStatus('Generando archivo EPUB traducido...');
-      const newEpub = await zip.generateAsync({ type: 'blob' });
+      
+      // Crear nuevo EPUB válido
+      const newZip = new JSZip();
+      
+      // 1. Agregar mimetype primero y sin compresión (requerido por EPUB)
+      newZip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
+      
+      // 2. Copiar todos los archivos del original, reemplazando los traducidos
+      const allFiles = Object.keys(zip.files);
+      for (const fileName of allFiles) {
+        if (fileName === 'mimetype') continue; // Ya agregado
+        
+        const originalFile = zip.file(fileName);
+        if (!originalFile) continue;
+        
+        let content: string | ArrayBuffer;
+        if (translatedFiles.has(fileName)) {
+          // Usar versión traducida
+          content = translatedFiles.get(fileName)!;
+        } else {
+          // Usar archivo original
+          content = await originalFile.async('string');
+        }
+        
+        // Mantener la compresión original para archivos no traducidos
+        const options = translatedFiles.has(fileName) ? {} : { compression: originalFile.options?.compression };
+        newZip.file(fileName, content, options);
+      }
+      
+      const newEpub = await newZip.generateAsync({ type: 'blob' });
       const fileName = selectedFile.name.replace('.epub', `_${targetLanguage}.epub`);
       setTranslatedFileName(fileName);
       (window as any)._epubTranslatedBlob = newEpub;
