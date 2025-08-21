@@ -7,10 +7,11 @@ import { useToast } from '@/hooks/use-toast';
 import { useOpenRouter } from '@/hooks/useOpenRouter';
 
 import FileUpload from '@/components/FileUpload';
-import ApiKeyInput from '@/components/ApiKeyInput';
 import LanguageSelector from '@/components/LanguageSelector';
-import ModelSelector from '@/components/ModelSelector';
 import TranslationProgress from '@/components/TranslationProgress';
+import JSZip from 'jszip';
+import { XMLParser, XMLBuilder } from 'fast-xml-parser';
+import translate from 'libretranslate';
 
 interface Model {
   id: string;
@@ -23,11 +24,7 @@ interface Model {
 
 const Index = () => {
   const { toast } = useToast();
-  const { validateApiKey, fetchModels, translateText, isValidating, isLoadingModels } = useOpenRouter();
-
-  // API Key state
-  const [apiKey, setApiKey] = useState('');
-  const [isApiKeyValid, setIsApiKeyValid] = useState<boolean | null>(null);
+  const { translateText, isValidating, isLoadingModels } = useOpenRouter();
 
   // File state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -35,10 +32,6 @@ const Index = () => {
   // Language state
   const [sourceLanguage, setSourceLanguage] = useState('auto');
   const [targetLanguage, setTargetLanguage] = useState('es');
-
-  // Model state
-  const [models, setModels] = useState<Model[]>([]);
-  const [selectedModel, setSelectedModel] = useState('anthropic/claude-3.5-sonnet');
 
   // Translation state
   const [isProcessing, setIsProcessing] = useState(false);
@@ -48,34 +41,27 @@ const Index = () => {
   const [error, setError] = useState<string | null>(null);
   const [translatedFileName, setTranslatedFileName] = useState('');
 
-  const handleApiKeyValidation = useCallback(async () => {
-    if (!apiKey) return;
-
-    const isValid = await validateApiKey(apiKey);
-    setIsApiKeyValid(isValid);
-
-    if (isValid) {
-      toast({
-        title: "API Key válida",
-        description: "Conexión establecida correctamente con OpenRouter"
-      });
-
-      // Fetch available models
-      const availableModels = await fetchModels(apiKey);
-      setModels(availableModels);
-    } else {
-      toast({
-        title: "Error de conexión",
-        description: "No se pudo validar la API Key",
-        variant: "destructive"
-      });
-    }
-  }, [apiKey, validateApiKey, fetchModels, toast]);
-
-  const handleFileSelect = useCallback((file: File) => {
+  const handleFileSelect = useCallback(async (file: File) => {
     setSelectedFile(file);
     setIsComplete(false);
     setError(null);
+    // --- INICIO: Extracción de archivos internos EPUB ---
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const zip = await JSZip.loadAsync(arrayBuffer);
+      const fileNames = Object.keys(zip.files);
+      // Filtrar archivos que suelen contener el texto (XHTML/HTML)
+      const textFiles = fileNames.filter(name =>
+        name.endsWith('.xhtml') || name.endsWith('.html')
+      );
+      console.log('Archivos de texto encontrados en el EPUB:', textFiles);
+      // Guardar zip y textFiles en el estado para usarlos en la traducción
+      (window as any)._epubZip = zip;
+      (window as any)._epubTextFiles = textFiles;
+    } catch (e) {
+      console.error('Error al analizar el EPUB:', e);
+    }
+    // --- FIN: Extracción de archivos internos EPUB ---
   }, []);
 
   const handleRemoveFile = useCallback(() => {
@@ -84,73 +70,102 @@ const Index = () => {
     setError(null);
   }, []);
 
-  const simulateTranslation = useCallback(async () => {
-    if (!selectedFile || !apiKey || !isApiKeyValid) return;
+  // Nueva función: Traducción con LibreTranslate
+  const libreTranslateText = async (text: string, sourceLang: string, targetLang: string): Promise<string> => {
+    try {
+      const res = await fetch('https://libretranslate.com/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          q: text,
+          source: sourceLang === 'auto' ? 'auto' : sourceLang,
+          target: targetLang,
+          format: 'html'
+        })
+      });
+      const data = await res.json();
+      return data.translatedText || text;
+    } catch (e) {
+      console.error('Error en LibreTranslate:', e);
+      return text;
+    }
+  };
 
+  const handleRealTranslation = useCallback(async () => {
+    if (!selectedFile) return;
     setIsProcessing(true);
     setProgress(0);
     setError(null);
     setIsComplete(false);
-
+    setStatus('Preparando archivo EPUB...');
     try {
-      // Simulate file processing stages
-      const stages = [
-        { message: 'Leyendo archivo EPUB...', duration: 1000 },
-        { message: 'Extrayendo contenido...', duration: 1500 },
-        { message: 'Dividiendo texto en secciones...', duration: 800 },
-        { message: 'Traduciendo contenido...', duration: 3000 },
-        { message: 'Generando archivo EPUB traducido...', duration: 1200 },
-        { message: 'Finalizando traducción...', duration: 500 }
-      ];
-
+      const zip = (window as any)._epubZip as JSZip;
+      const textFiles: string[] = (window as any)._epubTextFiles;
+      if (!zip || !textFiles) throw new Error('No se pudo cargar el EPUB');
+      const parser = new XMLParser({ ignoreAttributes: false });
+      const builder = new XMLBuilder({ ignoreAttributes: false });
       let currentProgress = 0;
-      const progressIncrement = 100 / stages.length;
-
-      for (const stage of stages) {
-        setStatus(stage.message);
-        await new Promise(resolve => setTimeout(resolve, stage.duration));
+      const progressIncrement = 100 / textFiles.length;
+      for (const fileName of textFiles) {
+        setStatus(`Traduciendo: ${fileName}`);
+        const fileContent = await zip.file(fileName)?.async('string');
+        if (!fileContent) continue;
+        const xmlObj = parser.parse(fileContent);
+        let bodyText = '';
+        if (xmlObj.html && xmlObj.html.body) {
+          bodyText = builder.build(xmlObj.html.body);
+        } else {
+          bodyText = fileContent;
+        }
+        // Traducción con LibreTranslate
+        const translated = await libreTranslateText(bodyText, sourceLanguage, targetLanguage);
+        if (xmlObj.html && xmlObj.html.body) {
+          xmlObj.html.body = parser.parse(`<body>${translated}</body>`).body;
+          const newXml = builder.build(xmlObj);
+          zip.file(fileName, newXml);
+        } else {
+          zip.file(fileName, translated);
+        }
         currentProgress += progressIncrement;
         setProgress(Math.min(currentProgress, 100));
       }
-
-      // Set completion state
+      setStatus('Generando archivo EPUB traducido...');
+      const newEpub = await zip.generateAsync({ type: 'blob' });
       const fileName = selectedFile.name.replace('.epub', `_${targetLanguage}.epub`);
       setTranslatedFileName(fileName);
+      (window as any)._epubTranslatedBlob = newEpub;
       setIsComplete(true);
       setStatus('Traducción completada');
-
       toast({
-        title: "¡Traducción completada!",
+        title: '¡Traducción completada!',
         description: `El archivo ${fileName} está listo para descargar`
       });
-
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error durante la traducción');
       toast({
-        title: "Error en la traducción",
-        description: "Hubo un problema durante el proceso de traducción",
-        variant: "destructive"
+        title: 'Error en la traducción',
+        description: 'Hubo un problema durante el proceso de traducción',
+        variant: 'destructive'
       });
     } finally {
       setIsProcessing(false);
     }
-  }, [selectedFile, apiKey, isApiKeyValid, targetLanguage, toast]);
+  }, [selectedFile, sourceLanguage, targetLanguage, toast]);
 
   const handleDownload = useCallback(() => {
-    // Create a dummy blob for demonstration
-    const blob = new Blob(['EPUB content placeholder'], { type: 'application/epub+zip' });
+    const blob = (window as any)._epubTranslatedBlob;
+    if (!blob) return;
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = translatedFileName;
-    link.click();
-    URL.revokeObjectURL(url);
-
-    toast({
-      title: "Descarga iniciada",
-      description: "El archivo traducido se está descargando"
-    });
-  }, [translatedFileName, toast]);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = translatedFileName || 'libro_traducido.epub';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 100);
+  }, [translatedFileName]);
 
   const handleReset = useCallback(() => {
     setSelectedFile(null);
@@ -159,8 +174,6 @@ const Index = () => {
     setProgress(0);
     setStatus('');
   }, []);
-
-  const canStartTranslation = selectedFile && apiKey && isApiKeyValid && !isProcessing;
 
   return (
     <div className="min-h-screen bg-background">
@@ -173,10 +186,10 @@ const Index = () => {
             </div>
             <div>
               <h1 className="text-2xl font-bold bg-gradient-primary bg-clip-text text-transparent">
-                EPUB Scribe Translate
+                EPUB Translate Free
               </h1>
               <p className="text-sm text-muted-foreground">
-                Traduce tus libros electrónicos con IA avanzada
+                Traduce tus libros electrónicos gratis
               </p>
             </div>
           </div>
@@ -195,8 +208,7 @@ const Index = () => {
               <div className="space-y-2">
                 <h2 className="text-3xl font-bold">Traduce cualquier libro en segundos</h2>
                 <p className="text-muted-foreground max-w-2xl mx-auto">
-                  Conecta tu API de OpenRouter, sube tu archivo .epub y deja que la IA traduzca 
-                  tu contenido manteniendo el formato y estructura original.
+                  Sube tu archivo .epub y deja que la IA traduzca tu contenido manteniendo el formato y estructura original.
                 </p>
               </div>
             </div>
@@ -204,34 +216,17 @@ const Index = () => {
         </Card>
 
         {/* Configuration Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <ApiKeyInput
-            apiKey={apiKey}
-            onApiKeyChange={setApiKey}
-            onValidateKey={handleApiKeyValidation}
-            isValidating={isValidating}
-            isValid={isApiKeyValid}
-          />
-          
-          <ModelSelector
-            selectedModel={selectedModel}
-            onModelChange={setSelectedModel}
-            models={models}
-            isLoading={isLoadingModels}
-          />
-        </div>
-
-        <Separator className="my-8 opacity-50" />
-
-        {/* Translation Section */}
-        <div className="space-y-6">
-          <LanguageSelector
+        <LanguageSelector
             sourceLanguage={sourceLanguage}
             targetLanguage={targetLanguage}
             onSourceLanguageChange={setSourceLanguage}
             onTargetLanguageChange={setTargetLanguage}
           />
 
+        <Separator className="my-8 opacity-50" />
+
+        {/* Translation Section */}
+        <div className="space-y-6">
           <FileUpload
             onFileSelect={handleFileSelect}
             selectedFile={selectedFile}
@@ -239,11 +234,11 @@ const Index = () => {
             isProcessing={isProcessing}
           />
 
-          {selectedFile && isApiKeyValid && (
+          {selectedFile && (
             <div className="text-center">
               <Button
-                onClick={simulateTranslation}
-                disabled={!canStartTranslation}
+                onClick={handleRealTranslation}
+                disabled={isProcessing}
                 variant="glow"
                 size="lg"
                 className="min-w-48"
