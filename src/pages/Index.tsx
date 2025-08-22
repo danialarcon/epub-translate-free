@@ -51,7 +51,200 @@ const googleTranslateText = async (text: string, sourceLang: string, targetLang:
 // Determina si un archivo debe omitirse de traducción
 const shouldSkipTranslation = (name: string) => {
   const lower = name.toLowerCase();
-  return lower.includes('toc') || lower.includes('nav') || lower.includes('cover') || lower.endsWith('.css');
+  
+  // Archivos que NO deben traducirse:
+  return (
+    // Archivos de navegación y estructura
+    lower.includes('toc') || 
+    lower.includes('nav') || 
+    lower.includes('cover') || 
+    lower.includes('titlepage') ||
+    lower.includes('copyright') ||
+    lower.includes('dedication') ||
+    
+    // Archivos de estilo
+    lower.endsWith('.css') ||
+    lower.includes('stylesheet') ||
+    
+    // Imágenes (preservar completamente)
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.gif') ||
+    lower.endsWith('.svg') ||
+    lower.endsWith('.webp') ||
+    
+    // Archivos de metadatos
+    lower.endsWith('.opf') ||
+    lower.includes('content.opf') ||
+    lower.includes('package.opf') ||
+    
+    // Archivos de configuración
+    lower.endsWith('.ncx') ||
+    lower.includes('toc.ncx') ||
+    
+    // Archivos de fuentes
+    lower.endsWith('.ttf') ||
+    lower.endsWith('.otf') ||
+    lower.endsWith('.woff') ||
+    lower.endsWith('.woff2') ||
+    
+    // Otros archivos binarios
+    lower.endsWith('.pdf') ||
+    lower.endsWith('.mp3') ||
+    lower.endsWith('.mp4')
+  );
+};
+
+// Determina si un archivo es una imagen
+const isImageFile = (name: string) => {
+  const lower = name.toLowerCase();
+  return (
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    lower.endsWith('.png') ||
+    lower.endsWith('.gif') ||
+    lower.endsWith('.svg') ||
+    lower.endsWith('.webp')
+  );
+};
+
+// Determina si un archivo es de estilo
+const isStyleFile = (name: string) => {
+  const lower = name.toLowerCase();
+  return lower.endsWith('.css') || lower.includes('stylesheet');
+};
+
+// Función para validar que el contenido traducido no esté vacío o corrupto
+const validateTranslatedContent = (originalContent: string, translatedContent: string, fileName: string): {
+  isValid: boolean;
+  reason?: string;
+  shouldUseOriginal: boolean;
+} => {
+  // Si el contenido traducido está vacío o es muy pequeño
+  if (!translatedContent || translatedContent.trim().length === 0) {
+    return {
+      isValid: false,
+      reason: 'Contenido traducido vacío',
+      shouldUseOriginal: true
+    };
+  }
+  
+  // Si el contenido traducido es significativamente más pequeño (más del 50% de pérdida)
+  const originalLength = originalContent.length;
+  const translatedLength = translatedContent.length;
+  const lossPercentage = ((originalLength - translatedLength) / originalLength) * 100;
+  
+  if (lossPercentage > 50) {
+    return {
+      isValid: false,
+      reason: `Pérdida excesiva de contenido (${lossPercentage.toFixed(1)}%)`,
+      shouldUseOriginal: true
+    };
+  }
+  
+  // Si el contenido traducido es muy pequeño en términos absolutos
+  if (translatedLength < 100 && originalLength > 1000) {
+    return {
+      isValid: false,
+      reason: 'Contenido traducido demasiado pequeño',
+      shouldUseOriginal: true
+    };
+  }
+  
+  // Verificar que el contenido traducido tenga estructura HTML básica
+  if (!translatedContent.includes('<') || !translatedContent.includes('>')) {
+    return {
+      isValid: false,
+      reason: 'Contenido traducido no tiene estructura HTML',
+      shouldUseOriginal: true
+    };
+  }
+  
+  return {
+    isValid: true,
+    shouldUseOriginal: false
+  };
+};
+
+// Función mejorada para extraer texto traducible
+const extractTranslatableText = (htmlContent: string): {
+  text: string;
+  imageTags: string[];
+  styleTags: string[];
+  scriptTags: string[];
+  hasContent: boolean;
+} => {
+  // Preservar etiquetas de imagen y otros elementos que no deben traducirse
+  const imageTags: string[] = [];
+  const styleTags: string[] = [];
+  const scriptTags: string[] = [];
+  
+  // Extraer y reemplazar etiquetas de imagen con placeholders
+  let processedContent = htmlContent.replace(
+    /<img[^>]*>/gi,
+    (match) => {
+      imageTags.push(match);
+      return `__IMAGE_PLACEHOLDER_${imageTags.length - 1}__`;
+    }
+  );
+  
+  // Extraer y reemplazar etiquetas de estilo
+  processedContent = processedContent.replace(
+    /<style[^>]*>[\s\S]*?<\/style>/gi,
+    (match) => {
+      styleTags.push(match);
+      return `__STYLE_PLACEHOLDER_${styleTags.length - 1}__`;
+    }
+  );
+  
+  // Extraer y reemplazar etiquetas de script
+  processedContent = processedContent.replace(
+    /<script[^>]*>[\s\S]*?<\/script>/gi,
+    (match) => {
+      scriptTags.push(match);
+      return `__SCRIPT_PLACEHOLDER_${scriptTags.length - 1}__`;
+    }
+  );
+  
+  // Verificar si hay contenido traducible
+  const textContent = processedContent.replace(/<[^>]*>/g, '').trim();
+  const hasContent = textContent.length > 10; // Al menos 10 caracteres de texto
+  
+  return {
+    text: processedContent,
+    imageTags,
+    styleTags,
+    scriptTags,
+    hasContent
+  };
+};
+
+// Restaura las etiquetas originales en el texto traducido
+const restoreOriginalTags = (
+  translatedText: string, 
+  imageTags: string[], 
+  styleTags: string[], 
+  scriptTags: string[]
+): string => {
+  let restoredText = translatedText;
+  
+  // Restaurar etiquetas de imagen
+  imageTags.forEach((tag, index) => {
+    restoredText = restoredText.replace(`__IMAGE_PLACEHOLDER_${index}__`, tag);
+  });
+  
+  // Restaurar etiquetas de estilo
+  styleTags.forEach((tag, index) => {
+    restoredText = restoredText.replace(`__STYLE_PLACEHOLDER_${index}__`, tag);
+  });
+  
+  // Restaurar etiquetas de script
+  scriptTags.forEach((tag, index) => {
+    restoredText = restoredText.replace(`__SCRIPT_PLACEHOLDER_${index}__`, tag);
+  });
+  
+  return restoredText;
 };
 
 interface Model {
@@ -128,6 +321,202 @@ const translateChunksInParallel = async (
 // Función para esperar un tiempo específico
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Función para validar la estructura de un EPUB
+const validateEpubStructure = async (zip: JSZip): Promise<{
+  isValid: boolean;
+  errors: string[];
+  warnings: string[];
+  fileCount: number;
+  missingFiles: string[];
+}> => {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const missingFiles: string[] = [];
+  
+  // Verificar archivos esenciales
+  const essentialFiles = ['mimetype', 'META-INF/container.xml'];
+  for (const file of essentialFiles) {
+    if (!zip.file(file)) {
+      errors.push(`Archivo esencial faltante: ${file}`);
+      missingFiles.push(file);
+    }
+  }
+  
+  // Verificar mimetype
+  const mimetype = zip.file('mimetype');
+  if (mimetype) {
+    const mimetypeContent = await mimetype.async('string');
+    if (mimetypeContent !== 'application/epub+zip') {
+      errors.push(`Mimetype incorrecto: ${mimetypeContent}`);
+    }
+  }
+  
+  // Contar archivos por tipo
+  const allFiles = Object.keys(zip.files);
+  const textFiles = allFiles.filter(name => name.endsWith('.xhtml') || name.endsWith('.html'));
+  const imageFiles = allFiles.filter(name => isImageFile(name));
+  const styleFiles = allFiles.filter(name => isStyleFile(name));
+  
+  console.log('📊 Análisis de archivos EPUB:');
+  console.log(`- Total archivos: ${allFiles.length}`);
+  console.log(`- Archivos de texto: ${textFiles.length}`);
+  console.log(`- Archivos de imagen: ${imageFiles.length}`);
+  console.log(`- Archivos de estilo: ${styleFiles.length}`);
+  
+  if (textFiles.length === 0) {
+    warnings.push('No se encontraron archivos de texto para traducir');
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings,
+    fileCount: allFiles.length,
+    missingFiles
+  };
+};
+
+// Función para comparar archivos originales vs traducidos
+const compareEpubFiles = async (
+  originalZip: JSZip, 
+  translatedZip: JSZip
+): Promise<{
+  differences: string[];
+  missingInTranslated: string[];
+  extraInTranslated: string[];
+  sizeChanges: { fileName: string; originalSize: number; translatedSize: number; change: number }[];
+}> => {
+  const differences: string[] = [];
+  const missingInTranslated: string[] = [];
+  const extraInTranslated: string[] = [];
+  const sizeChanges: { fileName: string; originalSize: number; translatedSize: number; change: number }[] = [];
+  
+  const originalFiles = Object.keys(originalZip.files);
+  const translatedFiles = Object.keys(translatedZip.files);
+  
+  // Archivos faltantes en la versión traducida
+  for (const fileName of originalFiles) {
+    if (!translatedZip.file(fileName)) {
+      missingInTranslated.push(fileName);
+      differences.push(`❌ Faltante en traducción: ${fileName}`);
+    }
+  }
+  
+  // Archivos extra en la versión traducida
+  for (const fileName of translatedFiles) {
+    if (!originalZip.file(fileName)) {
+      extraInTranslated.push(fileName);
+      differences.push(`➕ Extra en traducción: ${fileName}`);
+    }
+  }
+  
+  // Comparar tamaños de archivos
+  for (const fileName of originalFiles) {
+    const originalFile = originalZip.file(fileName);
+    const translatedFile = translatedZip.file(fileName);
+    
+    if (originalFile && translatedFile) {
+      try {
+        const originalContent = await originalFile.async('string');
+        const translatedContent = await translatedFile.async('string');
+        const originalSize = originalContent.length;
+        const translatedSize = translatedContent.length;
+        const change = translatedSize - originalSize;
+        
+        if (Math.abs(change) > 100) { // Solo mostrar cambios significativos
+          sizeChanges.push({ fileName, originalSize, translatedSize, change });
+          differences.push(`📏 Cambio de tamaño: ${fileName} (${originalSize} → ${translatedSize}, ${change > 0 ? '+' : ''}${change})`);
+        }
+      } catch (error) {
+        // Para archivos binarios, usar un método alternativo
+        differences.push(`⚠️ No se pudo comparar tamaño: ${fileName} (archivo binario)`);
+      }
+    }
+  }
+  
+  return { differences, missingInTranslated, extraInTranslated, sizeChanges };
+};
+
+  // Función para generar reporte de debugging
+  const generateDebugReport = async (
+    originalZip: JSZip,
+    translatedZip: JSZip,
+    translatedFiles: Map<string, string>,
+    failedFiles: string[] = []
+  ): Promise<string> => {
+  let report = '🔍 REPORTE DE DEBUGGING EPUB\n';
+  report += '='.repeat(50) + '\n\n';
+  
+  // Validar estructura original
+  const originalValidation = await validateEpubStructure(originalZip);
+  report += '📋 VALIDACIÓN EPUB ORIGINAL:\n';
+  report += `✅ Válido: ${originalValidation.isValid}\n`;
+  report += `📁 Total archivos: ${originalValidation.fileCount}\n`;
+  if (originalValidation.errors.length > 0) {
+    report += `❌ Errores: ${originalValidation.errors.join(', ')}\n`;
+  }
+  if (originalValidation.warnings.length > 0) {
+    report += `⚠️ Advertencias: ${originalValidation.warnings.join(', ')}\n`;
+  }
+  report += '\n';
+  
+  // Validar estructura traducida
+  const translatedValidation = await validateEpubStructure(translatedZip);
+  report += '📋 VALIDACIÓN EPUB TRADUCIDO:\n';
+  report += `✅ Válido: ${translatedValidation.isValid}\n`;
+  report += `📁 Total archivos: ${translatedValidation.fileCount}\n`;
+  if (translatedValidation.errors.length > 0) {
+    report += `❌ Errores: ${translatedValidation.errors.join(', ')}\n`;
+  }
+  if (translatedValidation.warnings.length > 0) {
+    report += `⚠️ Advertencias: ${translatedValidation.warnings.join(', ')}\n`;
+  }
+  report += '\n';
+  
+  // Comparar archivos
+  const comparison = await compareEpubFiles(originalZip, translatedZip);
+  report += '🔄 COMPARACIÓN DE ARCHIVOS:\n';
+  if (comparison.differences.length > 0) {
+    report += comparison.differences.join('\n') + '\n';
+  } else {
+    report += '✅ No se encontraron diferencias significativas\n';
+  }
+  report += '\n';
+  
+  // Archivos traducidos
+  report += '📝 ARCHIVOS TRADUCIDOS:\n';
+  for (const [fileName, content] of translatedFiles.entries()) {
+    report += `- ${fileName} (${content.length} caracteres)\n`;
+  }
+  report += '\n';
+  
+  // Archivos preservados
+  const allFiles = Object.keys(originalZip.files);
+  const preservedFiles = allFiles.filter(name => !translatedFiles.has(name) && !shouldSkipTranslation(name));
+  report += '💾 ARCHIVOS PRESERVADOS:\n';
+  for (const fileName of preservedFiles) {
+    report += `- ${fileName}\n`;
+  }
+  report += '\n';
+  
+  // Archivos excluidos
+  const excludedFiles = allFiles.filter(name => shouldSkipTranslation(name));
+  report += '🚫 ARCHIVOS EXCLUIDOS DE TRADUCCIÓN:\n';
+  for (const fileName of excludedFiles) {
+    report += `- ${fileName}\n`;
+  }
+  
+  // Archivos que fallaron en la traducción
+  if (failedFiles.length > 0) {
+    report += '\n❌ ARCHIVOS QUE FALLARON EN LA TRADUCCIÓN:\n';
+    for (const failedFile of failedFiles) {
+      report += `- ${failedFile}\n`;
+    }
+  }
+  
+  return report;
+};
+
 const Index = () => {
   const { toast } = useToast();
   const { translateText, isValidating, isLoadingModels } = useOpenRouter();
@@ -146,29 +535,70 @@ const Index = () => {
   const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [translatedFileName, setTranslatedFileName] = useState('');
+  
+  // Debug state
+  const [debugReport, setDebugReport] = useState<string>('');
+  const [showDebugInfo, setShowDebugInfo] = useState(false);
+  const [failedFiles, setFailedFiles] = useState<string[]>([]);
 
   const handleFileSelect = useCallback(async (file: File) => {
     setSelectedFile(file);
     setIsComplete(false);
     setError(null);
-    // --- INICIO: Extracción de archivos internos EPUB ---
+    setDebugReport('');
+    
+    // --- INICIO: Extracción y validación de archivos internos EPUB ---
     try {
       const arrayBuffer = await file.arrayBuffer();
       const zip = await JSZip.loadAsync(arrayBuffer);
       const fileNames = Object.keys(zip.files);
+      
+      // Validar estructura del EPUB
+      const validation = await validateEpubStructure(zip);
+      console.log('📋 Validación EPUB:', validation);
+      
+      if (!validation.isValid) {
+        setError(`EPUB inválido: ${validation.errors.join(', ')}`);
+        toast({
+          title: 'EPUB inválido',
+          description: 'El archivo EPUB no tiene la estructura correcta',
+          variant: 'destructive'
+        });
+        return;
+      }
+      
       // Filtrar archivos que suelen contener el texto (XHTML/HTML)
       const textFiles = fileNames.filter(name =>
         name.endsWith('.xhtml') || name.endsWith('.html')
       );
-      console.log('Archivos de texto encontrados en el EPUB:', textFiles);
+      
+      console.log('📊 Análisis del EPUB:');
+      console.log('- Archivos de texto encontrados:', textFiles);
+      console.log('- Total archivos:', fileNames.length);
+      console.log('- Archivos de imagen:', fileNames.filter(name => isImageFile(name)));
+      console.log('- Archivos de estilo:', fileNames.filter(name => isStyleFile(name)));
+      
       // Guardar zip y textFiles en el estado para usarlos en la traducción
       (window as any)._epubZip = zip;
       (window as any)._epubTextFiles = textFiles;
+      
+      // Mostrar información del EPUB
+      toast({
+        title: 'EPUB cargado correctamente',
+        description: `${textFiles.length} archivos de texto encontrados para traducir`
+      });
+      
     } catch (e) {
       console.error('Error al analizar el EPUB:', e);
+      setError('Error al procesar el archivo EPUB');
+      toast({
+        title: 'Error al procesar EPUB',
+        description: 'El archivo no es un EPUB válido',
+        variant: 'destructive'
+      });
     }
-    // --- FIN: Extracción de archivos internos EPUB ---
-  }, []);
+    // --- FIN: Extracción y validación de archivos internos EPUB ---
+  }, [toast]);
 
   const handleRemoveFile = useCallback(() => {
     setSelectedFile(null);
@@ -182,6 +612,7 @@ const Index = () => {
     setProgress(0);
     setError(null);
     setIsComplete(false);
+    setFailedFiles([]);
     setStatus('Preparando archivo EPUB...');
     try {
       const zip = (window as any)._epubZip as JSZip;
@@ -206,7 +637,7 @@ const Index = () => {
           const fileContent = await zip.file(fileName)?.async('string');
           if (!fileContent) continue;
           
-          // Extraer texto de forma más simple
+          // Extraer texto preservando imágenes y estilos
           let bodyText = '';
           try {
             const xmlObj = parser.parse(fileContent);
@@ -220,8 +651,14 @@ const Index = () => {
             bodyText = fileContent;
           }
           
-          const chunks = splitTextIntoChunks(bodyText);
-          totalChunks += chunks.length;
+          // Extraer solo el texto traducible
+          const { text: translatableText, hasContent } = extractTranslatableText(bodyText);
+          
+          // Solo contar chunks si hay contenido traducible
+          if (hasContent) {
+            const chunks = splitTextIntoChunks(translatableText);
+            totalChunks += chunks.length;
+          }
         } catch (error) {
           console.warn('Error procesando archivo:', fileName, error);
         }
@@ -234,12 +671,15 @@ const Index = () => {
           const fileContent = await zip.file(fileName)?.async('string');
           if (!fileContent) continue;
           
-          // Extraer texto de forma más simple y segura
+          // Extraer texto preservando imágenes y estilos
           let bodyText = '';
+          let originalStructure = null;
+          
           try {
             const xmlObj = parser.parse(fileContent);
             if (xmlObj.html && xmlObj.html.body) {
               bodyText = builder.build(xmlObj.html.body);
+              originalStructure = xmlObj;
             } else {
               bodyText = fileContent;
             }
@@ -248,8 +688,18 @@ const Index = () => {
             bodyText = fileContent;
           }
           
+          // Extraer texto traducible preservando etiquetas de imagen y estilo
+          const { text: translatableText, imageTags, styleTags, scriptTags, hasContent } = extractTranslatableText(bodyText);
+          
+          // Verificar si hay contenido para traducir
+          if (!hasContent) {
+            console.log(`⚠️ Archivo sin contenido traducible: ${fileName}`);
+            failedFiles.push(`${fileName} (sin contenido traducible)`);
+            continue; // Saltar este archivo
+          }
+          
           // Dividir texto en chunks y traducir en paralelo
-          const chunks = splitTextIntoChunks(bodyText);
+          const chunks = splitTextIntoChunks(translatableText);
           
           // Traducir chunks en paralelo
           const translatedChunks = await translateChunksInParallel(chunks, sourceLanguage, targetLanguage, 3);
@@ -259,23 +709,40 @@ const Index = () => {
           setProgress((processedChunks / totalChunks) * 100);
           
           const translatedText = translatedChunks.join('');
+          
+          // Restaurar etiquetas originales (imágenes, estilos, scripts)
+          const finalText = restoreOriginalTags(translatedText, imageTags, styleTags, scriptTags);
+          
+          // Validar el contenido traducido
+          const validation = validateTranslatedContent(bodyText, finalText, fileName);
+          if (!validation.isValid) {
+            console.warn(`⚠️ Contenido traducido inválido para ${fileName}: ${validation.reason}`);
+            failedFiles.push(`${fileName} (${validation.reason})`);
+            if (validation.shouldUseOriginal) {
+              console.log(`🔄 Usando contenido original para ${fileName}`);
+              continue; // Usar contenido original
+            }
+          }
+          
           console.log('Archivo:', fileName);
           console.log('Texto original:', bodyText.slice(0, 500));
-          console.log('Texto traducido:', translatedText.slice(0, 500));
+          console.log('Texto traducido:', finalText.slice(0, 500));
           
-          // Reemplazar el contenido del archivo
+          // Reemplazar el contenido del archivo preservando la estructura original
           try {
-            const xmlObj = parser.parse(fileContent);
-            if (xmlObj.html && xmlObj.html.body) {
-              xmlObj.html.body = parser.parse(`<body>${translatedText}</body>`).body;
-              const newXml = builder.build(xmlObj);
+            if (originalStructure && originalStructure.html && originalStructure.html.body) {
+              // Reconstruir el body con el texto traducido
+              const newBody = parser.parse(`<body>${finalText}</body>`).body;
+              originalStructure.html.body = newBody;
+              const newXml = builder.build(originalStructure);
               translatedFiles.set(fileName, newXml);
             } else {
-              translatedFiles.set(fileName, translatedText);
+              // Si no hay estructura XML clara, usar el texto final directamente
+              translatedFiles.set(fileName, finalText);
             }
           } catch (parseError) {
-            // Si falla el parsing, reemplazar todo el contenido
-            translatedFiles.set(fileName, translatedText);
+            console.warn('Error reconstruyendo XML, usando texto directo:', fileName);
+            translatedFiles.set(fileName, finalText);
           }
         } catch (error) {
           console.error('Error procesando archivo:', fileName, error);
@@ -298,17 +765,30 @@ const Index = () => {
         const originalFile = zip.file(fileName);
         if (!originalFile) continue;
         
+        // Verificar que el archivo no sea un directorio vacío
+        if (originalFile.dir) continue; // Saltar directorios
+        
         let content: string | ArrayBuffer;
+        let options: any = {};
+        
         if (translatedFiles.has(fileName)) {
-          // Usar versión traducida
+          // Usar versión traducida (archivos de texto)
           content = translatedFiles.get(fileName)!;
-        } else {
-          // Usar archivo original
+          options = {}; // Sin compresión para archivos traducidos
+        } else if (isImageFile(fileName)) {
+          // Preservar imágenes exactamente como están
+          content = await originalFile.async('arraybuffer');
+          options = { compression: originalFile.options?.compression };
+        } else if (isStyleFile(fileName)) {
+          // Preservar archivos CSS exactamente como están
           content = await originalFile.async('string');
+          options = { compression: originalFile.options?.compression };
+        } else {
+          // Otros archivos (metadatos, etc.) - preservar original
+          content = await originalFile.async('string');
+          options = { compression: originalFile.options?.compression };
         }
         
-        // Mantener la compresión original para archivos no traducidos
-        const options = translatedFiles.has(fileName) ? {} : { compression: originalFile.options?.compression };
         newZip.file(fileName, content, options);
       }
       
@@ -316,6 +796,18 @@ const Index = () => {
       const fileName = selectedFile.name.replace('.epub', `_${targetLanguage}.epub`);
       setTranslatedFileName(fileName);
       (window as any)._epubTranslatedBlob = newEpub;
+      
+      // Generar reporte de debugging
+      setStatus('Generando reporte de debugging...');
+      try {
+        const report = await generateDebugReport(zip, newZip, translatedFiles, failedFiles);
+        setDebugReport(report);
+        console.log('🔍 Reporte de debugging:', report);
+      } catch (error) {
+        console.error('Error generando reporte:', error);
+        setDebugReport('Error generando reporte de debugging');
+      }
+      
       setIsComplete(true);
       setStatus('Traducción completada');
       toast({
@@ -390,7 +882,7 @@ const Index = () => {
               <div className="space-y-2">
                 <h2 className="text-3xl font-bold">Traduce cualquier libro en segundos</h2>
                 <p className="text-muted-foreground max-w-2xl mx-auto">
-                  Sube tu archivo .epub y deja que la IA traduzca tu contenido manteniendo el formato y estructura original.
+                  Sube tu archivo .epub y deja que la IA traduzca tu contenido manteniendo el formato, imágenes y estilos originales.
                 </p>
               </div>
             </div>
@@ -406,6 +898,35 @@ const Index = () => {
           />
 
         <Separator className="my-8 opacity-50" />
+
+        {/* Features Section */}
+        <Card className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20">
+          <CardContent className="py-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
+              <div className="space-y-2">
+                <div className="w-12 h-12 mx-auto rounded-lg bg-green-100 dark:bg-green-900/20 flex items-center justify-center">
+                  <BookOpen className="h-6 w-6 text-green-600 dark:text-green-400" />
+                </div>
+                <h3 className="font-semibold">Preserva Imágenes</h3>
+                <p className="text-sm text-muted-foreground">Las imágenes se mantienen intactas sin traducir</p>
+              </div>
+              <div className="space-y-2">
+                <div className="w-12 h-12 mx-auto rounded-lg bg-blue-100 dark:bg-blue-900/20 flex items-center justify-center">
+                  <Sparkles className="h-6 w-6 text-blue-600 dark:text-blue-400" />
+                </div>
+                <h3 className="font-semibold">Mantiene Estilos</h3>
+                <p className="text-sm text-muted-foreground">CSS y formato original preservados completamente</p>
+              </div>
+              <div className="space-y-2">
+                <div className="w-12 h-12 mx-auto rounded-lg bg-purple-100 dark:bg-purple-900/20 flex items-center justify-center">
+                  <Globe className="h-6 w-6 text-purple-600 dark:text-purple-400" />
+                </div>
+                <h3 className="font-semibold">Traducción Inteligente</h3>
+                <p className="text-sm text-muted-foreground">Solo traduce el texto, preserva estructura EPUB</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Translation Section */}
         <div className="space-y-6">
@@ -450,6 +971,68 @@ const Index = () => {
             onDownload={handleDownload}
             onReset={handleReset}
           />
+
+          {/* Debug Information */}
+          {isComplete && debugReport && (
+            <Card className="bg-yellow-50 dark:bg-yellow-950/20 border-yellow-200 dark:border-yellow-800">
+              <CardContent className="py-4">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-semibold text-yellow-800 dark:text-yellow-200">
+                    🔍 Información de Debugging
+                  </h3>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowDebugInfo(!showDebugInfo)}
+                  >
+                    {showDebugInfo ? 'Ocultar' : 'Mostrar'} Detalles
+                  </Button>
+                </div>
+                
+                {showDebugInfo && (
+                  <div className="space-y-4">
+                    <div className="bg-white dark:bg-gray-900 p-4 rounded-lg border">
+                      <pre className="text-xs overflow-auto max-h-96 whitespace-pre-wrap">
+                        {debugReport}
+                      </pre>
+                    </div>
+                    
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          const blob = new Blob([debugReport], { type: 'text/plain' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = 'debug-report.txt';
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                      >
+                        📥 Descargar Reporte
+                      </Button>
+                      
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          navigator.clipboard.writeText(debugReport);
+                          toast({
+                            title: 'Reporte copiado',
+                            description: 'El reporte de debugging se copió al portapapeles'
+                          });
+                        }}
+                      >
+                        📋 Copiar al Portapapeles
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
         </div>
       </main>
     </div>
