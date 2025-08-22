@@ -11,22 +11,41 @@ import LanguageSelector from '@/components/LanguageSelector';
 import TranslationProgress from '@/components/TranslationProgress';
 import JSZip from 'jszip';
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
-// Nueva función: Traducción con Google Translate API
+// Nueva función: Traducción con Google Translate API optimizada
 // Endpoint local para traducción (evita CORS)
-const googleTranslateText = async (text: string, sourceLang: string, targetLang: string): Promise<string> => {
-  try {
-    const res = await fetch('/api/translate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, from: sourceLang === 'auto' ? 'auto' : sourceLang, to: targetLang })
-    });
-    if (!res.ok) throw new Error('Bad response');
-    const data = await res.json();
-    return data.translatedText || text;
-  } catch (e) {
-    console.error('Error en Google Translate:', e);
-    return text;
+const googleTranslateText = async (text: string, sourceLang: string, targetLang: string, retries: number = 2): Promise<string> => {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch('/api/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, from: sourceLang === 'auto' ? 'auto' : sourceLang, to: targetLang })
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        return data.translatedText || text;
+      } else if (res.status === 408) {
+        // Timeout - reintentar
+        console.warn(`Timeout en intento ${attempt + 1}, reintentando...`);
+        if (attempt < retries) {
+          await sleep(1000 * (attempt + 1)); // Backoff exponencial
+          continue;
+        }
+      } else {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+    } catch (e) {
+      console.error(`Error en Google Translate (intento ${attempt + 1}):`, e);
+      if (attempt < retries) {
+        await sleep(500 * (attempt + 1)); // Backoff exponencial
+        continue;
+      }
+    }
   }
+  
+  // Si todos los intentos fallan, devolver texto original
+  return text;
 };
 
 // Determina si un archivo debe omitirse de traducción
@@ -44,8 +63,8 @@ interface Model {
   fast?: boolean;
 }
 
-// Función para dividir texto en fragmentos más pequeños
-const splitTextIntoChunks = (text: string, maxChunkSize: number = 1000): string[] => {
+// Función para dividir texto en fragmentos más pequeños y optimizados
+const splitTextIntoChunks = (text: string, maxChunkSize: number = 2000): string[] => {
   const chunks: string[] = [];
   let currentChunk = '';
   
@@ -66,6 +85,44 @@ const splitTextIntoChunks = (text: string, maxChunkSize: number = 1000): string[
   }
   
   return chunks.length > 0 ? chunks : [text];
+};
+
+// Función para traducir chunks en paralelo con rate limiting
+const translateChunksInParallel = async (
+  chunks: string[], 
+  sourceLanguage: string, 
+  targetLanguage: string,
+  maxConcurrent: number = 3
+): Promise<string[]> => {
+  const results: string[] = new Array(chunks.length);
+  const translatedChunks: string[] = [];
+  
+  // Procesar chunks en lotes para evitar sobrecargar la API
+  for (let i = 0; i < chunks.length; i += maxConcurrent) {
+    const batch = chunks.slice(i, i + maxConcurrent);
+    const promises = batch.map(async (chunk, index) => {
+      const globalIndex = i + index;
+      try {
+        const translated = await googleTranslateText(chunk, sourceLanguage, targetLanguage);
+        results[globalIndex] = translated;
+        return { index: globalIndex, success: true, text: translated };
+      } catch (error) {
+        console.error('Error traduciendo chunk:', error);
+        results[globalIndex] = chunk; // Usar texto original si falla
+        return { index: globalIndex, success: false, text: chunk };
+      }
+    });
+    
+    // Esperar a que se complete el lote actual
+    await Promise.all(promises);
+    
+    // Pausa mínima entre lotes para evitar rate limiting
+    if (i + maxConcurrent < chunks.length) {
+      await sleep(200); // Reducido de 1000ms a 200ms
+    }
+  }
+  
+  return results;
 };
 
 // Función para esperar un tiempo específico
@@ -191,24 +248,15 @@ const Index = () => {
             bodyText = fileContent;
           }
           
-          // Dividir texto en chunks y traducir cada uno
+          // Dividir texto en chunks y traducir en paralelo
           const chunks = splitTextIntoChunks(bodyText);
-          let translatedChunks: string[] = [];
           
-          for (const chunk of chunks) {
-            try {
-              const translated = await googleTranslateText(chunk, sourceLanguage, targetLanguage);
-              translatedChunks.push(translated);
-              processedChunks++;
-              setProgress((processedChunks / totalChunks) * 100);
-              
-              // Pausa de 1 segundo entre traducciones
-              await sleep(1000);
-            } catch (error) {
-              console.error('Error traduciendo chunk:', error);
-              translatedChunks.push(chunk); // Usar texto original si falla
-            }
-          }
+          // Traducir chunks en paralelo
+          const translatedChunks = await translateChunksInParallel(chunks, sourceLanguage, targetLanguage, 3);
+          
+          // Actualizar progreso
+          processedChunks += chunks.length;
+          setProgress((processedChunks / totalChunks) * 100);
           
           const translatedText = translatedChunks.join('');
           console.log('Archivo:', fileName);
